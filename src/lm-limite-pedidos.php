@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Límite de pedidos por IP o cuenta
  * Description: Frena a quien crea pedidos en serie para agotar el inventario. Cuenta los pedidos reales ya creados desde la misma IP (o la misma cuenta) y, pasado un umbral holgado, no deja crear otro por un rato.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: Andrés Valencia Tobón
  * Author URI: https://github.com/quijotevitruvio
  * License: GPL-2.0-or-later
@@ -28,6 +28,12 @@
  * Los administradores y gestores de la tienda nunca se limitan.
  * Cada bloqueo suma 1 en la opción `lm_limite_pedidos_bloqueos` (contador por día, sin IPs).
  * Requiere WooCommerce con HPOS (lee la tabla wc_orders).
+ *
+ * IP real (1.1.0): la IP sale de lm_ip_real() (REMOTE_ADDR; CF-Connecting-IP solo
+ * si REMOTE_ADDR es un nodo de Cloudflare), nunca de X-Forwarded-For / X-Real-IP,
+ * que cualquiera puede inventar. Esas dos cabeceras se igualan a la IP real para
+ * que WooCommerce guarde en el pedido la misma IP con la que se cuenta. Detrás de
+ * otro proxy (no Cloudflare), configura el servidor para que reescriba REMOTE_ADDR.
  */
 
 defined( 'ABSPATH' ) || exit;
@@ -46,12 +52,94 @@ function lm_lp_activo() {
 	return '0' !== (string) get_option( 'lm_limite_pedidos_activo', '1' );
 }
 
-/** IP del cliente con el mismo criterio con que WooCommerce la guarda en el pedido. */
-function lm_lp_ip() {
-	if ( class_exists( 'WC_Geolocation' ) ) {
-		return (string) WC_Geolocation::get_ip_address();
+/**
+ * Rangos oficiales de Cloudflare (https://www.cloudflare.com/ips-v4 y /ips-v6,
+ * copiados el 2026-10-03). Si Cloudflare añade rangos, actualizar esta lista;
+ * mientras tanto, una petición desde un rango nuevo cuenta con la IP del nodo
+ * de Cloudflare (más estricto, nunca más permisivo).
+ */
+function lm_ip_rangos_cloudflare() {
+	return array(
+		'173.245.48.0/20', '103.21.244.0/22', '103.22.200.0/22', '103.31.4.0/22',
+		'141.101.64.0/18', '108.162.192.0/18', '190.93.240.0/20', '188.114.96.0/20',
+		'197.234.240.0/22', '198.41.128.0/17', '162.158.0.0/15', '104.16.0.0/13',
+		'104.24.0.0/14', '172.64.0.0/13', '131.0.72.0/22',
+		'2400:cb00::/32', '2606:4700::/32', '2803:f800::/32', '2405:b500::/32',
+		'2405:8100::/32', '2a06:98c0::/29', '2c0f:f248::/32',
+	);
+}
+
+/** ¿Está $ip dentro del rango CIDR $cidr? (IPv4 e IPv6, sin dependencias). */
+function lm_ip_en_rango( $ip, $cidr ) {
+	list( $red, $bits ) = array_pad( explode( '/', $cidr, 2 ), 2, null );
+	$a = @inet_pton( $ip );  // phpcs:ignore
+	$b = @inet_pton( $red ); // phpcs:ignore
+	if ( false === $a || false === $b || strlen( $a ) !== strlen( $b ) ) {
+		return false;
 	}
-	return isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '';
+	$bits  = null === $bits ? strlen( $a ) * 8 : (int) $bits;
+	$bytes = intdiv( $bits, 8 );
+	if ( 0 !== substr_compare( $a, $b, 0, $bytes ) ) {
+		return false;
+	}
+	$resto = $bits % 8;
+	if ( 0 === $resto ) {
+		return true;
+	}
+	$mask = ( 0xFF << ( 8 - $resto ) ) & 0xFF;
+	return ( ord( $a[ $bytes ] ) & $mask ) === ( ord( $b[ $bytes ] ) & $mask );
+}
+
+/**
+ * IP real del visitante, imposible de falsear con cabeceras.
+ *  - REMOTE_ADDR es la IP de quien abrió la conexión. En este hosting LiteSpeed
+ *    ya la reescribe con la IP del visitante cuando la conexión viene de
+ *    Cloudflare (comprobado el 2026-10-03), así que normalmente basta con ella.
+ *  - Si REMOTE_ADDR es un nodo de Cloudflare (el servidor no la reescribió),
+ *    se usa CF-Connecting-IP, y SOLO en ese caso: fuera de Cloudflare esa
+ *    cabecera la puede escribir cualquiera.
+ *  - X-Forwarded-For y X-Real-IP no se creen nunca.
+ */
+function lm_ip_real() {
+	$remota = isset( $_SERVER['REMOTE_ADDR'] ) ? trim( (string) $_SERVER['REMOTE_ADDR'] ) : ''; // phpcs:ignore
+	$remota = (string) filter_var( $remota, FILTER_VALIDATE_IP );
+	if ( '' === $remota ) {
+		return '';
+	}
+	if ( ! empty( $_SERVER['HTTP_CF_CONNECTING_IP'] ) ) {
+		foreach ( lm_ip_rangos_cloudflare() as $rango ) {
+			if ( lm_ip_en_rango( $remota, $rango ) ) {
+				$cf = (string) filter_var( trim( (string) $_SERVER['HTTP_CF_CONNECTING_IP'] ), FILTER_VALIDATE_IP ); // phpcs:ignore
+				return '' !== $cf ? $cf : $remota;
+			}
+		}
+	}
+	return $remota;
+}
+
+/**
+ * WooCommerce guarda en el pedido la IP de WC_Geolocation::get_ip_address(), que
+ * lee primero X-Real-IP y X-Forwarded-For. Se igualan a la IP real para que lo
+ * guardado (y lo que lean otros plugins) no se pueda falsear y coincida con lo
+ * que cuenta este límite.
+ */
+function lm_ip_normalizar_cabeceras() {
+	$ip = lm_ip_real();
+	if ( '' === $ip ) {
+		return;
+	}
+	if ( isset( $_SERVER['HTTP_X_FORWARDED_FOR'] ) ) {
+		$_SERVER['HTTP_X_FORWARDED_FOR'] = $ip;
+	}
+	if ( isset( $_SERVER['HTTP_X_REAL_IP'] ) ) {
+		$_SERVER['HTTP_X_REAL_IP'] = $ip;
+	}
+}
+lm_ip_normalizar_cabeceras();
+
+/** IP con la que se cuentan los pedidos (la misma que WooCommerce guarda tras normalizar). */
+function lm_lp_ip() {
+	return lm_ip_real();
 }
 
 /** Texto final de los mensajes de bloqueo (p. ej. «escríbenos por WhatsApp»). Opción `lm_limite_pedidos_contacto`. */

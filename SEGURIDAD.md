@@ -1,6 +1,6 @@
 # Seguridad
 
-Revisión hecha antes de publicar 1.0.0. Gravedad: alta / media / baja / informativa.
+Revisión hecha antes de publicar 1.0.0; actualizada en 1.1.0 (2026-10-03). Gravedad: alta / media / baja / informativa.
 
 ## Arreglado en este repositorio
 | Hallazgo | Archivo | Gravedad | Qué se hizo |
@@ -11,11 +11,11 @@ Revisión hecha antes de publicar 1.0.0. Gravedad: alta / media / baja / informa
 | Función global con prefijo ajeno `wc_price_to_text_safe` (choque con WooCommerce u otros plugins) | `src/lm-alerta-venta.php` | baja | Renombrada a `lm_alerta_precio_texto` |
 | Ruta REST privada de la tienda de origen cableada en el límite de pedidos | `src/lm-limite-pedidos.php` | informativa | Sustituida por el filtro `lm_limite_pedidos_rutas_rest` (vacío por defecto) |
 | Token `?lm_recover` sin validar formato antes de consultar | `src/lm-carrito-abandonado.php` | informativa | Se exige `^[A-Za-z0-9]{20}$` (ya iba con `$wpdb->prepare`) |
+| (1.1.0) El límite por IP se saltaba enviando `X-Forwarded-For` / `X-Real-IP` distintos en cada pedido: la IP salía de `WC_Geolocation::get_ip_address()`, que confía en esas cabeceras | `src/lm-limite-pedidos.php` (`lm_lp_ip`, nuevo `lm_ip_real`) | media | IP de `REMOTE_ADDR`; `CF-Connecting-IP` solo si la conexión viene de un rango oficial de Cloudflare (lista embebida); esas cabeceras se igualan a la IP real para que el pedido guarde la misma. Probado en producción: con `X-Forwarded-For` y `CF-Connecting-IP` falsos, el límite y WooCommerce ven la IP real |
 
 ## Pendiente (no arreglado)
 | Hallazgo | Archivo | Gravedad | Recomendación |
 |---|---|---|---|
-| La IP sale de `WC_Geolocation::get_ip_address()`, que confía en `X-Real-IP` / `X-Forwarded-For`. Sin un proxy que los reescriba, un atacante puede cambiar de «IP» en cada pedido y saltarse el límite por IP (el límite por cuenta sigue valiendo si está logueado) | `src/lm-limite-pedidos.php` (`lm_lp_ip`) | media | Detrás de un proxy fiable, que este reescriba esas cabeceras; si no, usar `REMOTE_ADDR` (pero entonces no coincidirá con la IP que WooCommerce guarda en el pedido) |
 | Consentimiento por casilla sin doble confirmación: cualquiera puede marcarla con un correo ajeno en un pedido | `src/lm-comunicaciones.php` (`lm_com_tiene_consentimiento`) | baja | Añadir doble opt-in si la ley o el riesgo lo piden |
 | Las bajas y el registro usan SHA-256 sin sal del correo: es seudonimización, no anonimato | `src/lm-comunicaciones.php` (`lm_com_hash`) | informativa | Documentado; no presentarlo como dato anónimo |
 
