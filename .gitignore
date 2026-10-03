@@ -1,0 +1,12 @@
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.log
+*.bak
+*.zip
+.env
+node_modules/
+vendor/
